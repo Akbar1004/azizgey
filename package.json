@@ -1,0 +1,23 @@
+{
+  "name": "target-integrity-os",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Target International School — Integrity OS: AI homework, anti-cheat, voice defense and Angry Mentor ecosystem",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "NODE_ENV=production node server/index.js",
+    "build": "vite build",
+    "preview": "NODE_ENV=production node server/index.js"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.2.5",
+    "@fontsource-variable/space-grotesk": "^5.2.8",
+    "express": "^4.21.2",
+    "lucide-react": "^0.469.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.0.7",
+    "@vitejs/plugin-react": "^4.3.4"
+  }
+}
