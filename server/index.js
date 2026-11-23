@@ -1,59 +1,61 @@
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  school, teacher, students, parents, perks, submissions, assignmentSets, ledger, redemptions,
-  SETTINGS, currentSet, getStudent, getSet, studentAssignment, createSubmission, addDefense,
-  approveSubmission, flagSubmission, addCoins, redeemPerk, leaderboard, heatmap, parentReport,
-  overviewStats, studentDashboard, audit, telegramLog, mentorSessions,
+  SETTINGS, currentSet, getStudent, createSubmission, addDefense, approveSubmission,
+  flagSubmission, redeemPerk, leaderboard, heatmap, parentReport, studentDashboard,
+  addCoins, students,
 } from './store.js';
-import { generateVariants, publicVariant } from './generator.js';
-import { analyzeText, similarity } from './detector.js';
+import { generateVariants } from './generator.js';
+import { analyzeText } from './detector.js';
 import { tutorTurn, tutorLog } from './socratic.js';
 import { mentorTurn, mentorState } from './mentor.js';
 import { compareVoiceprints, MATCH_THRESHOLD } from './voiceprint.js';
-import { MASTER_SYSTEM_PROMPT, ASSIGNMENT_GENERATOR_PROMPT, REALTIME_VOICE_PROMPT, REALTIME_SESSION_CONFIG, REAL_ADAPTER_NOTE } from './prompts.js';
+import {
+  healthPayload, bootstrapPayload, teacherOverviewPayload, teacherSubmissionPayload,
+  setsPayload, rewardsPayload, promptsPayload,
+} from './payloads.js';
+import { parents, submissions, assignmentSets, audit, telegramLog, teacher } from './store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
 const app = express();
-app.use(express.json({ limit: '8mb' }));
 
 app.disable('x-powered-by');
+app.use(express.json({ limit: '8mb' }));
 
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-
-/* ------------------------------------------------------------------ meta */
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, module: 'integrity-os', provider: SETTINGS.modelProvider, uptime: Math.round(process.uptime()) });
+/**
+ * CORS + cache policy.
+ * The preview proxy and any separate frontend origin are allowed; credentials are
+ * not used, so reflecting the Origin (with Vary) is safe and keeps a LAN demo working.
+ * API responses are never cached, so a stale "server unreachable" cannot survive a retry.
+ */
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  if (req.path.startsWith('/api') || req.path === '/health') res.setHeader('Cache-Control', 'no-store');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
 });
 
+/* ------------------------------------------------------------------ health */
+const health = (_req, res) => res.json(healthPayload());
+app.get('/health', health);
+app.get('/api/health', health);
+
+/* ------------------------------------------------------------------ meta */
 app.get('/api/bootstrap', (req, res) => {
-  const studentId = req.query.studentId || 'aziz';
-  const student = getStudent(studentId);
-  res.json({
-    school,
-    teacher,
-    settings: SETTINGS,
-    viewer: student ? { id: student.id, name: student.name, role: 'student', avatar: student.avatar, coins: student.coins } : null,
-    roster: students.map((s) => ({ id: s.id, name: s.name, avatar: s.avatar, tone: s.tone, branchId: s.branchId, className: s.className, section: s.section, coins: s.coins })),
-    parents: parents.map((p) => ({ id: p.id, name: p.name, childId: p.childId, childName: p.childName, telegram: p.telegram })),
-    set: (() => { const s = currentSet(); return { id: s.id, title: s.title, topic: s.topic, dueAt: s.dueAt, status: s.status, variantCount: s.variants.length }; })(),
-    stats: overviewStats(),
-  });
+  res.json(bootstrapPayload(req.query.studentId || 'aziz'));
 });
 
 /* ------------------------------------------------------------------ teacher */
 app.get('/api/teacher/overview', (_req, res) => {
-  res.json({
-    stats: overviewStats(),
-    heatmap: heatmap(),
-    leaderboard: leaderboard(),
-    queue: submissions.slice().sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt)),
-    sets: assignmentSets.map((s) => ({ id: s.id, title: s.title, dueAt: s.dueAt, status: s.status, variants: s.variants.length, lessonDate: s.lessonDate })),
-    teacher,
-    audit: audit.slice(0, 12),
-  });
+  res.json(teacherOverviewPayload());
 });
 
 app.get('/api/teacher/submissions', (req, res) => {
@@ -65,11 +67,9 @@ app.get('/api/teacher/submissions', (req, res) => {
 });
 
 app.get('/api/teacher/submissions/:id', (req, res) => {
-  const sub = submissions.find((s) => s.id === req.params.id);
-  if (!sub) return res.status(404).json({ error: 'Submission not found' });
-  const set = getSet(sub.setId);
-  const variant = set?.variants.find((v) => v.code === sub.variantCode);
-  res.json({ submission: sub, variant, tutorLog: tutorLog(sub.studentId), peers: submissions.filter((s) => s.setId === sub.setId && s.studentId !== sub.studentId).map((s) => ({ id: s.id, name: s.studentName, similarity: similarity(sub.text, s.text) })) });
+  const payload = teacherSubmissionPayload(req.params.id);
+  if (!payload) return res.status(404).json({ error: `Submission ${req.params.id} not found.` });
+  res.json(payload);
 });
 
 app.post('/api/teacher/submissions/:id/approve', (req, res) => {
@@ -83,16 +83,7 @@ app.post('/api/teacher/submissions/:id/flag', (req, res) => {
 });
 
 app.get('/api/teacher/heatmap', (_req, res) => res.json(heatmap()));
-
-app.get('/api/teacher/sets', (_req, res) => {
-  res.json({
-    sets: assignmentSets.map((s) => ({
-      ...s,
-      variants: s.variants.map((v) => v),
-    })),
-    activeId: currentSet().id,
-  });
-});
+app.get('/api/teacher/sets', (_req, res) => res.json(setsPayload({ includeKeys: true })));
 
 app.post('/api/teacher/generate', (req, res) => {
   const { subject, grade, topic, classDetail } = req.body || {};
@@ -124,7 +115,7 @@ app.post('/api/teacher/publish', (req, res) => {
     id: `A-${Date.now()}-pub`,
     at: new Date().toISOString(),
     kind: 'system',
-    text: `${teacher.name} published “${topic}” — ${variants.length} unique variants assigned across ${new Set(students.map((s) => s.section)).size} sections.`,
+    text: `${teacher.name} published “${topic}” — ${variants.length} unique variants assigned across ${new Set(students.map((st) => st.section)).size} sections.`,
   });
   res.json({ set, activeId: set.id });
 });
@@ -142,7 +133,7 @@ app.post('/api/student/:id/analyze', (req, res) => {
   const { text = '', setId } = req.body || {};
   const student = getStudent(req.params.id);
   if (!student) return res.status(404).json({ error: 'Unknown student' });
-  const set = setId ? getSet(setId) : currentSet();
+  const set = setId ? assignmentSets.find((s) => s.id === setId) : currentSet();
   const variant = set.variants[student.variantIndex % set.variants.length];
   if (!text.trim()) return res.json({ empty: true });
   const report = analyzeText(text, variant);
@@ -184,7 +175,7 @@ app.post('/api/submissions', (req, res) => {
 
 app.get('/api/submissions/:id/defense-question', (req, res) => {
   const sub = submissions.find((s) => s.id === req.params.id);
-  if (!sub) return res.status(404).json({ error: 'Submission not found' });
+  if (!sub) return res.status(404).json({ error: `Submission ${req.params.id} not found.` });
   const paragraphs = sub.text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.split(/\s+/).length > 12);
   const sentences = sub.text.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.split(/\s+/).length > 8);
   const target = paragraphs[Math.min(1, paragraphs.length - 1)] || sentences[0] || sub.text.slice(0, 140);
@@ -208,7 +199,7 @@ app.get('/api/submissions/:id/defense-question', (req, res) => {
 
 app.post('/api/submissions/:id/defense', (req, res) => {
   const sub = submissions.find((s) => s.id === req.params.id);
-  if (!sub) return res.status(404).json({ error: 'Submission not found' });
+  if (!sub) return res.status(404).json({ error: `Submission ${req.params.id} not found.` });
   const student = getStudent(sub.studentId);
   const { fingerprint, durationS = 0, transcriptQuality = 'clear', question, simulated = false } = req.body || {};
   if (!fingerprint) return res.status(400).json({ error: 'No acoustic fingerprint supplied.' });
@@ -279,22 +270,16 @@ app.post('/api/mentor/turn', (req, res) => {
 
 app.post('/api/mentor/end', (req, res) => {
   const { studentId = 'aziz' } = req.body || {};
-  const st = mentorSessions.get(studentId);
-  res.json({ summary: mentorState(studentId), sessionClosed: !!st });
+  res.json({ summary: mentorState(studentId), sessionClosed: true });
 });
 
 /* ------------------------------------------------------------------ rewards */
 app.get('/api/leaderboard', (_req, res) => res.json(leaderboard()));
 
 app.get('/api/rewards/:studentId', (req, res) => {
-  const student = getStudent(req.params.studentId);
-  if (!student) return res.status(404).json({ error: 'Unknown student' });
-  res.json({
-    student,
-    perks,
-    redemptions: redemptions.filter((r) => r.studentId === student.id),
-    ledger: ledger.filter((l) => l.studentId === student.id).slice(0, 20),
-  });
+  const payload = rewardsPayload(req.params.studentId);
+  if (!payload) return res.status(404).json({ error: 'Unknown student' });
+  res.json(payload);
 });
 
 app.post('/api/rewards/redeem', (req, res) => {
@@ -309,6 +294,7 @@ app.post('/api/rewards/redeem', (req, res) => {
 
 /* ------------------------------------------------------------------ parents */
 app.get('/api/parents', (_req, res) => res.json({ parents }));
+app.get('/api/parents/telegram-log', (_req, res) => res.json({ log: telegramLog }));
 app.get('/api/parents/:id/report', (req, res) => {
   try {
     res.json(parentReport(req.params.id));
@@ -327,31 +313,34 @@ app.post('/api/parents/:id/send', (req, res) => {
     res.status(404).json({ error: e.message });
   }
 });
-app.get('/api/parents/telegram-log', (_req, res) => res.json({ log: telegramLog }));
 
 /* ------------------------------------------------------------------ prompts */
-app.get('/api/prompts', (_req, res) => {
-  res.json({
-    master: MASTER_SYSTEM_PROMPT,
-    assignment: ASSIGNMENT_GENERATOR_PROMPT,
-    realtime: REALTIME_VOICE_PROMPT,
-    sessionConfig: REALTIME_SESSION_CONFIG,
-    adapterNote: REAL_ADAPTER_NOTE,
-    provider: SETTINGS.modelProvider,
-    demoMode: SETTINGS.demoMode,
-  });
-});
+app.get('/api/prompts', (_req, res) => res.json(promptsPayload()));
 
 app.get('/api/audit', (_req, res) => res.json({ audit: audit.slice(0, 40) }));
 
-/* ------------------------------------------------------------------ frontend */
-const isProd = process.env.NODE_ENV === 'production';
+/* ------------------------------------------------------------------ fallbacks */
+// Explicit JSON 404 for the API so a typo'd route never returns the SPA HTML
+// (which the client would treat as a malformed response).
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: `No API route for ${req.method} ${req.originalUrl}`,
+    hint: 'Check server/index.js. GET /health reports server status.',
+  });
+});
 
-if (isProd) {
-  const dist = path.resolve(__dirname, '../dist');
-  app.use(express.static(dist, { index: false }));
+const isProd = process.env.NODE_ENV === 'production';
+const dist = path.resolve(__dirname, '../dist');
+const hasBuild = fs.existsSync(path.join(dist, 'index.html'));
+
+if (isProd && hasBuild) {
+  app.use(express.static(dist, { index: false, maxAge: '1h' }));
   app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
 } else {
+  if (isProd) {
+    console.warn('[boot] dist/index.html is missing — falling back to the Vite middleware so the app still loads.');
+    console.warn('[boot] Run `npm run build` for the optimised production bundle.');
+  }
   const { createServer } = await import('vite');
   const vite = await createServer({
     server: { middlewareMode: true, hmr: false, host: '0.0.0.0', allowedHosts: true },
@@ -360,11 +349,25 @@ if (isProd) {
   app.use(vite.middlewares);
 }
 
-app.use((err, _req, res, _next) => {
-  console.error('[api]', err);
-  res.status(err.status || 500).json({ error: err.message || 'Unexpected server error' });
+app.use((err, req, res, _next) => {
+  console.error('[api]', req.method, req.originalUrl, err);
+  res.status(err.status || 500).json({
+    error: err.message || 'Unexpected server error',
+    path: req.originalUrl,
+    kind: 'server-error',
+  });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`◈ Target Integrity OS · http://0.0.0.0:${PORT} · provider=${SETTINGS.modelProvider}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`◈ Target Integrity OS · http://0.0.0.0:${PORT}`);
+  console.log(`  health  GET /health · provider=${SETTINGS.modelProvider} · static=${isProd && hasBuild ? 'dist' : 'vite'}`);
 });
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    console.log(`\n[boot] ${signal} received — closing server`);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  });
+}
+

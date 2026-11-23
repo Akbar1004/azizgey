@@ -277,7 +277,12 @@ export default function Studio() {
                 right={<button className="btn tiny" onClick={() => setRevealKey((r) => !r)}>{revealKey ? <><EyeOff size={12} /> Hide</> : <><Eye size={12} /> Reveal</>}</button>}
               />
               <div className="card-body stack" style={{ gap: 10 }}>
-                {!revealKey ? (
+                {!openVariant.detectionKey ? (
+                  <div className="notice violet" style={{ borderColor: 'rgba(167,139,250,0.3)', background: 'rgba(167,139,250,0.07)' }}>
+                    <Lock size={14} />
+                    <span>The detection key is stripped from the offline snapshot. Reconnect to inspect it.</span>
+                  </div>
+                ) : !revealKey ? (
                   <div className="empty" style={{ padding: '14px 0' }}>
                     <Lock />
                     <b>Key hidden</b>
